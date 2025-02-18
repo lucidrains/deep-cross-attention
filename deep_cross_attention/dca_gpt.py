@@ -1,9 +1,9 @@
 import torch
-from torch import nn
+from torch import nn, cat, stack
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear, RMSNorm
 
-from einops import rearrange
+from einops import rearrange, einsum
 from einops.layers.torch import Rearrange
 
 from rotary_embedding_torch import RotaryEmbedding
@@ -33,9 +33,9 @@ class Attention(Module):
 
         self.rotary_embed = RotaryEmbedding(dim_head)
 
-        self.to_q = nn.Linear(dim, dim_inner, bias = False)
-        self.to_k = nn.Linear(dim, dim_inner, bias = False)
-        self.to_v = nn.Linear(dim, dim_inner, bias = False)
+        self.to_q = nn.Sequential(RMSNorm(dim), nn.Linear(dim, dim_inner, bias = False))
+        self.to_k = nn.Sequential(RMSNorm(dim), nn.Linear(dim, dim_inner, bias = False))
+        self.to_v = nn.Sequential(RMSNorm(dim), nn.Linear(dim, dim_inner, bias = False))
 
         self.split_heads = Rearrange('b n (h d) -> b h n d', h = heads)
         self.merge_heads = Rearrange('b h n d -> b n (h d)')
@@ -44,14 +44,14 @@ class Attention(Module):
 
     def forward(
         self,
-        x
+        q_input,
+        k_input,
+        v_input
     ):
 
-        x = self.norm(x)
-
-        q = self.to_q(x)
-        k = self.to_k(x)
-        v = self.to_v(x)
+        q = self.to_q(q_input)
+        k = self.to_k(k_input)
+        v = self.to_v(v_input)
 
         q, k, v = map(self.split_heads, (q, k, v))
 
@@ -76,15 +76,78 @@ def FeedForward(dim, expansion_factor = 4.):
     dim_hidden = int(dim * expansion_factor)
 
     return nn.Sequential(
-        RMSNorm(dim),
         Linear(dim, dim_hidden),
         nn.GELU(),
         Linear(dim_hidden, dim)
     )
 
+# GRNv3
+# the input dependent one lines up with all the literature, and the winning solution for hyper connections (dynamic)
+
+class GRN(Module):
+    def __init__(
+        self,
+        dim,
+    ):
+        super().__init__()
+
+        self.to_aggregate = nn.Sequential(
+            RMSNorm(dim),
+            Linear(dim, 1),
+            nn.ReLU(),
+        )
+
+        nn.init.zeros_(self.to_aggregate[-2].weight)
+
+    def forward(
+        self,
+        tokens_across_depth # Float['depth b n d']
+    ):
+        aggregate = self.to_aggregate(tokens_across_depth)
+
+        return (tokens_across_depth * aggregate).sum(dim = 0)
+
+# DCA Decoder Block
+
+class DCABlock(Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        ff_expansion_factor = 4.
+    ):
+        super().__init__()
+
+        self.q_grn = GRN(dim)
+        self.k_grn = GRN(dim)
+        self.v_grn = GRN(dim)
+
+        self.attn = Attention(dim = dim, dim_head = dim_head, heads = heads)
+
+        self.pre_ff_norm = RMSNorm(dim)
+
+        self.ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor)
+
+    def forward(
+        self,
+        tokens_across_depth # Float['depth b n d']
+    ):
+        q_input, k_input, v_input = self.q_grn(tokens_across_depth), self.k_grn(tokens_across_depth), self.v_grn(tokens_across_depth)
+
+        residual = q_input
+
+        attn_out = self.attn(q_input, k_input, v_input)
+
+        ff_input = self.pre_ff_norm(attn_out + residual)
+
+        ff_out = self.ff(ff_input)
+
+        return ff_out + attn_out
+
 # classes
 
-class DCATransformer(Module):
+class DCAGPT(Module):
     def __init__(
         self,
         num_tokens,
@@ -98,14 +161,24 @@ class DCATransformer(Module):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
 
-        layers = []
+        # the `k` hyperparameter, which seems to refer to sub sampling of which layers to include for efficiency
+        # but weirdly, they not only do last k layers, but also the first k? also some mention about intermediate layers being pooled? just go with first and last for now
+
+        self.past_layers_k = past_layers_k
+
+        # the proposed DCA blocks
+
+        dca_blocks = []
         for _ in range(depth):
-            attn = Attention(dim = dim, dim_head = dim_head, heads = heads)
-            ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor)
+            dca = DCABlock(dim = dim, dim_head = dim_head, heads = heads, ff_expansion_factor = ff_expansion_factor)
 
-            layers.append(ModuleList([attn, ff]))
+            dca_blocks.append(dca)
 
-        self.layers = ModuleList(layers)
+        self.dca_blocks = ModuleList(dca_blocks)
+
+        # norm and logits
+
+        self.final_grn = GRN(dim)
 
         self.norm = RMSNorm(dim)
         self.to_logits = Linear(dim, num_tokens, bias = False)
@@ -115,16 +188,39 @@ class DCATransformer(Module):
         ids,
         return_loss = False
     ):
+        k = self.past_layers_k # k in paper
+
         if return_loss:
             ids, labels = ids[:, :-1], ids[:, 1:]
 
         tokens = self.token_emb(ids)
 
-        for attn, ff in self.layers:
-            tokens = attn(tokens) + tokens
-            tokens = ff(tokens) + tokens
+        all_tokens = [tokens]
 
-        embed = self.norm(tokens)
+        for dca_block in self.dca_blocks:
+
+            all_tokens_stacked = stack(all_tokens)
+            num_layers = all_tokens_stacked.shape[0]
+
+            # determine which layers to include
+
+            if num_layers < (k * 2):
+                dca_block_input = all_tokens_stacked
+            else:
+                dca_block_input = cat((
+                    all_tokens_stacked[:k], # first k layers
+                    all_tokens_stacked[-k:] # last k layers
+                ))
+
+            dca_out = dca_block(dca_block_input)
+
+            # append dca output for next iteration
+
+            all_tokens.append(dca_out)
+
+        pooled_tokens = self.final_grn(stack(all_tokens))
+
+        embed = self.norm(pooled_tokens)
 
         logits = self.to_logits(embed)
 

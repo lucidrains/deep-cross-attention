@@ -1,6 +1,6 @@
 [project]
 name = "deep-cross-attention"
-version = "0.0.1"
+version = "0.0.2"
 description = "Deep Cross Attention Language Model"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -34,7 +34,9 @@ Homepage = "https://pypi.org/project/deep-cross-attention/"
 Repository = "https://github.com/lucidrains/deep-cross-attention"
 
 [project.optional-dependencies]
-examples = []
+examples = [
+    "tqdm"
+]
 test = [
     "pytest"
 ]
