@@ -1,0 +1,58 @@
+[project]
+name = "deep-cross-attention"
+version = "0.0.1"
+description = "Deep Cross Attention Language Model"
+authors = [
+    { name = "Phil Wang", email = "lucidrains@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">= 3.9"
+license = { file = "LICENSE" }
+keywords = [
+    'artificial intelligence',
+    'deep learning',
+    'transformers',
+    'residuals'
+]
+
+classifiers=[
+    'Development Status :: 4 - Beta',
+    'Intended Audience :: Developers',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3.9',
+]
+
+dependencies = [
+    "einops>=0.8.0",
+    "torch>=2.3",
+]
+
+[project.urls]
+Homepage = "https://pypi.org/project/deep-cross-attention/"
+Repository = "https://github.com/lucidrains/deep-cross-attention"
+
+[project.optional-dependencies]
+examples = []
+test = [
+    "pytest"
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "."
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["deep_cross_attention"]
