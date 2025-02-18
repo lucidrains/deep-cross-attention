@@ -4,7 +4,7 @@
 
 Implementation of the proposed [DeepCrossAttention](https://arxiv.org/abs/2502.06785) by [Mike Heddes](https://www.mikeheddes.nl/) while at Google research, in Pytorch
 
-My analysis is although I still prefer [Hyper Connections](https://arxiv.org/abs/2409.19606), they have an important idea here that I have been trying concurrently. Mainly the queries, keys, values can be [routed from different layers](https://github.com/lucidrains/x-transformers/blob/main/x_transformers/x_transformers.py#L1226) of the past. The reason this is cool is because it generalizes the recent [value residual learning](https://arxiv.org/abs/2410.17897) improvement
+My analysis is although I still prefer [Hyper Connections](https://arxiv.org/abs/2409.19606), they have an important idea here that I have been trying concurrently. Mainly the queries, keys, values can be [routed from different layers](https://github.com/lucidrains/x-transformers/blob/main/x_transformers/x_transformers.py#L1226) of the past. The reason this is cool is because it generalizes the recent [value residual learning](https://arxiv.org/abs/2410.17897) improvement. It may (or may not) also address an issue for [neural memories](https://github.com/lucidrains/titans-pytorch/commit/dc4aae6ec6be92e5d43a27289eabeefd801801e0#diff-2d103ee078dba8ee5f64916851e8715e55e313ebc95319e2bb4f457b59e6d29eR234)
 
 ## Install
 
