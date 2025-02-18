@@ -3,10 +3,18 @@ from torch import nn, cat, stack
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear, RMSNorm
 
+from rotary_embedding_torch import RotaryEmbedding
+
+import einx
 from einops import rearrange, einsum
 from einops.layers.torch import Rearrange
 
-from rotary_embedding_torch import RotaryEmbedding
+# ein notation
+
+# b - batch
+# n -sequence
+# h - heads
+# l - logits
 
 # functions
 
@@ -114,7 +122,7 @@ class GRN(Module):
 
         aggregate = self.to_aggregate(tokens_across_depth)
 
-        aggregate = F.relu(aggregate + self.bias[:, None, None, None])
+        aggregate = einx.add('depth ..., depth -> depth ...', aggregate, self.bias).relu()
 
         return (tokens_across_depth * aggregate).sum(dim = 0)
 
