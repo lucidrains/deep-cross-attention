@@ -88,22 +88,33 @@ class GRN(Module):
     def __init__(
         self,
         dim,
+        num_layers
     ):
         super().__init__()
 
+        self.num_layers = num_layers
+
         self.to_aggregate = nn.Sequential(
             RMSNorm(dim),
-            Linear(dim, 1),
-            nn.ReLU(),
+            Linear(dim, 1, bias = False),
         )
 
+        self.bias = nn.Parameter(torch.zeros(num_layers))
+
         nn.init.zeros_(self.to_aggregate[-2].weight)
+
+        with torch.no_grad():
+            self.bias[-1] = 1.
 
     def forward(
         self,
         tokens_across_depth # Float['depth b n d']
     ):
+        assert self.num_layers == tokens_across_depth.shape[0]
+
         aggregate = self.to_aggregate(tokens_across_depth)
+
+        aggregate = F.relu(aggregate + self.bias[:, None, None, None])
 
         return (tokens_across_depth * aggregate).sum(dim = 0)
 
@@ -113,15 +124,17 @@ class DCABlock(Module):
     def __init__(
         self,
         dim,
+        *,
+        grn_num_layers,
         dim_head = 64,
         heads = 8,
         ff_expansion_factor = 4.
     ):
         super().__init__()
 
-        self.q_grn = GRN(dim)
-        self.k_grn = GRN(dim)
-        self.v_grn = GRN(dim)
+        self.q_grn = GRN(dim, num_layers = grn_num_layers)
+        self.k_grn = GRN(dim, num_layers = grn_num_layers)
+        self.v_grn = GRN(dim, num_layers = grn_num_layers)
 
         self.attn = Attention(dim = dim, dim_head = dim_head, heads = heads)
 
@@ -169,8 +182,15 @@ class DCAGPT(Module):
         # the proposed DCA blocks
 
         dca_blocks = []
-        for _ in range(depth):
-            dca = DCABlock(dim = dim, dim_head = dim_head, heads = heads, ff_expansion_factor = ff_expansion_factor)
+        for i in range(depth):
+
+            dca = DCABlock(
+                dim = dim,
+                dim_head = dim_head,
+                heads = heads,
+                ff_expansion_factor = ff_expansion_factor,
+                grn_num_layers = min(past_layers_k * 2, i + 1)
+            )
 
             dca_blocks.append(dca)
 
@@ -178,7 +198,7 @@ class DCAGPT(Module):
 
         # norm and logits
 
-        self.final_grn = GRN(dim)
+        self.final_grn = GRN(dim, num_layers = depth + 1)
 
         self.norm = RMSNorm(dim)
         self.to_logits = Linear(dim, num_tokens, bias = False)
