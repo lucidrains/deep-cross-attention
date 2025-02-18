@@ -25,6 +25,7 @@ classifiers=[
 
 dependencies = [
     "einops>=0.8.0",
+    "rotary-embedding-torch",
     "torch>=2.3",
 ]
 
