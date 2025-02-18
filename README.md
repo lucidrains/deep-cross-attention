@@ -1,3 +1,5 @@
+<img src="./fig4.png" width="400px"></img>
+
 ## Deep Cross Attention (wip)
 
 Implementation of the proposed [DeepCrossAttention](https://arxiv.org/abs/2502.06785) by [Mike Heddes](https://www.mikeheddes.nl/) while at Google research, in Pytorch
