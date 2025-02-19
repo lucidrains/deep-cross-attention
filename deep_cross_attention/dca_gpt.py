@@ -214,17 +214,36 @@ class DCAGPT(Module):
 
         # norm and logits
 
-        self.final_grn = GRN(dim, num_layers = depth + 1)
+        self.final_grn = GRN(dim, num_layers = min(past_layers_k * 2, depth + 1))
 
         self.norm = RMSNorm(dim)
         self.to_logits = Linear(dim, num_tokens, bias = False)
  
+    def select_layers(
+        self,
+        all_tokens_stacked
+    ):
+        k = self.past_layers_k # k in paper
+
+        num_layers = all_tokens_stacked.shape[0]
+
+        # determine which layers to include
+
+        if num_layers < (k * 2):
+            return all_tokens_stacked
+
+        output = cat((
+            all_tokens_stacked[:k], # first k layers
+            all_tokens_stacked[-k:] # last k layers
+        ))
+
+        return output
+
     def forward(
         self,
         ids,
         return_loss = False
     ):
-        k = self.past_layers_k # k in paper
 
         if return_loss:
             ids, labels = ids[:, :-1], ids[:, 1:]
@@ -236,17 +255,8 @@ class DCAGPT(Module):
         for dca_block in self.dca_blocks:
 
             all_tokens_stacked = stack(all_tokens)
-            num_layers = all_tokens_stacked.shape[0]
 
-            # determine which layers to include
-
-            if num_layers < (k * 2):
-                dca_block_input = all_tokens_stacked
-            else:
-                dca_block_input = cat((
-                    all_tokens_stacked[:k], # first k layers
-                    all_tokens_stacked[-k:] # last k layers
-                ))
+            dca_block_input = self.select_layers(all_tokens_stacked)
 
             dca_out = dca_block(dca_block_input)
 
@@ -254,7 +264,9 @@ class DCAGPT(Module):
 
             all_tokens.append(dca_out)
 
-        pooled_tokens = self.final_grn(stack(all_tokens))
+        final_grn_input = self.select_layers(stack(all_tokens))
+
+        pooled_tokens = self.final_grn(final_grn_input)
 
         embed = self.norm(pooled_tokens)
 
