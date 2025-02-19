@@ -15,6 +15,8 @@ from einops.layers.torch import Rearrange
 # n -sequence
 # h - heads
 # l - logits
+# o - number of grn outputs
+# y - laYer
 
 # functions
 
@@ -96,35 +98,43 @@ class GRN(Module):
     def __init__(
         self,
         dim,
-        num_layers
+        num_layers,
+        num_outputs = 1
     ):
         super().__init__()
 
+        self.num_outputs = num_outputs
         self.num_layers = num_layers
 
         self.to_aggregate = nn.Sequential(
             RMSNorm(dim),
-            Linear(dim, 1, bias = False),
+            Linear(dim, num_outputs, bias = False),
+            Rearrange('... outputs -> outputs ...')
         )
 
-        self.bias = nn.Parameter(torch.zeros(num_layers))
+        self.bias = nn.Parameter(torch.zeros(num_outputs, num_layers))
 
         nn.init.zeros_(self.to_aggregate[-2].weight)
 
         with torch.no_grad():
-            self.bias[-1] = 1.
+            self.bias[:, -1] = 1.
 
     def forward(
         self,
-        tokens_across_depth # Float['depth b n d']
+        tokens_across_depth # Float['y b n d']
     ):
         assert self.num_layers == tokens_across_depth.shape[0]
 
         aggregate = self.to_aggregate(tokens_across_depth)
 
-        aggregate = einx.add('depth ..., depth -> depth ...', aggregate, self.bias).relu()
+        aggregate = einx.add('o y ..., o y -> o y ...', aggregate, self.bias).relu()
 
-        return (tokens_across_depth * aggregate).sum(dim = 0)
+        output = einsum(tokens_across_depth, aggregate, 'y b n d, o y b n -> o b n d')
+
+        if self.num_outputs == 1:
+            output = rearrange(output, '1 ... -> ...')
+
+        return output
 
 # DCA Decoder Block
 
@@ -140,9 +150,7 @@ class DCABlock(Module):
     ):
         super().__init__()
 
-        self.q_grn = GRN(dim, num_layers = grn_num_layers)
-        self.k_grn = GRN(dim, num_layers = grn_num_layers)
-        self.v_grn = GRN(dim, num_layers = grn_num_layers)
+        self.qkv_grn = GRN(dim, num_layers = grn_num_layers, num_outputs = 3)
 
         self.attn = Attention(dim = dim, dim_head = dim_head, heads = heads)
 
@@ -154,7 +162,7 @@ class DCABlock(Module):
         self,
         tokens_across_depth # Float['depth b n d']
     ):
-        q_input, k_input, v_input = self.q_grn(tokens_across_depth), self.k_grn(tokens_across_depth), self.v_grn(tokens_across_depth)
+        q_input, k_input, v_input = self.qkv_grn(tokens_across_depth)
 
         residual = q_input
 
