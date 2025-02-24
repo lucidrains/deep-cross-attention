@@ -125,7 +125,7 @@ class GRN(Module):
 
         aggregate = self.to_aggregate(tokens_across_depth).relu()
 
-        aggregate = einx.add('o y ... 1, o y ... p -> o y ... p', aggregate, self.bias)
+        aggregate = aggregate + self.bias
 
         output = einsum(tokens_across_depth, aggregate, 'y b n d, o y b n d -> o b n d')
 
