@@ -106,16 +106,17 @@ class GRN(Module):
         self.num_outputs = num_outputs
         self.num_layers = num_layers
 
+        linear = Linear(dim, num_outputs, bias = False)
+        nn.init.zeros_(linear.weight)
+
         self.to_aggregate = nn.Sequential(
             RMSNorm(dim),
-            Linear(dim, num_outputs, bias = False),
-            Rearrange('... (outputs 1) -> outputs ... 1')
+            linear,
+            nn.ReLU(),
+            Rearrange('... outputs -> outputs ...')
         )
 
-        self.bias = nn.Parameter(torch.ones(num_outputs, num_layers, 1, 1, dim))
-
-        nn.init.zeros_(self.to_aggregate[-2].weight)
-
+        self.bias = nn.Parameter(torch.ones(num_outputs, num_layers, dim))
 
     def forward(
         self,
@@ -123,9 +124,9 @@ class GRN(Module):
     ):
         assert self.num_layers == tokens_across_depth.shape[0]
 
-        aggregate = self.to_aggregate(tokens_across_depth).relu()
+        aggregate = self.to_aggregate(tokens_across_depth)
 
-        aggregate = aggregate + self.bias
+        aggregate = einx.add('o y b n, o y d -> o y b n d', aggregate, self.bias)
 
         output = einsum(tokens_across_depth, aggregate, 'y b n d, o y b n d -> o b n d')
 
