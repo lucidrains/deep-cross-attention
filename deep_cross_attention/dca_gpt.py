@@ -12,7 +12,7 @@ from einops.layers.torch import Rearrange
 # ein notation
 
 # b - batch
-# n -sequence
+# n - sequence
 # h - heads
 # l - logits
 # o - number of grn outputs
@@ -109,15 +109,13 @@ class GRN(Module):
         self.to_aggregate = nn.Sequential(
             RMSNorm(dim),
             Linear(dim, num_outputs, bias = False),
-            Rearrange('... outputs -> outputs ...')
+            Rearrange('... (outputs 1) -> outputs ... 1')
         )
 
-        self.bias = nn.Parameter(torch.zeros(num_outputs, num_layers))
+        self.bias = nn.Parameter(torch.ones(num_outputs, num_layers, 1, 1, dim))
 
         nn.init.zeros_(self.to_aggregate[-2].weight)
 
-        with torch.no_grad():
-            self.bias[:, -1] = 1.
 
     def forward(
         self,
@@ -125,11 +123,11 @@ class GRN(Module):
     ):
         assert self.num_layers == tokens_across_depth.shape[0]
 
-        aggregate = self.to_aggregate(tokens_across_depth)
+        aggregate = self.to_aggregate(tokens_across_depth).relu()
 
-        aggregate = einx.add('o y ..., o y -> o y ...', aggregate, self.bias).relu()
+        aggregate = aggregate + self.bias
 
-        output = einsum(tokens_across_depth, aggregate, 'y b n d, o y b n -> o b n d')
+        output = einsum(tokens_across_depth, aggregate, 'y b n d, o y b n d -> o b n d')
 
         if self.num_outputs == 1:
             output = rearrange(output, '1 ... -> ...')
