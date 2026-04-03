@@ -58,5 +58,13 @@ dev-dependencies = []
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "deep_cross_attention",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["deep_cross_attention"]
