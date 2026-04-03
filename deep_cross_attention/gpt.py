@@ -108,7 +108,7 @@ class GPT(Module):
 
         self.norm = RMSNorm(dim)
         self.to_logits = Linear(dim, num_tokens, bias = False)
- 
+
     def forward(
         self,
         ids,

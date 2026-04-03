@@ -1,32 +1,34 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "accelerate",
+#     "einops",
+#     "einx",
+#     "fire",
+#     "numpy",
+#     "rotary-embedding-torch",
+#     "torch",
+#     "tqdm",
+# ]
+# ///
+
 import math
 import gzip
 import random
 import tqdm
 import numpy as np
 
+import fire
 import torch
 from torch.optim import Adam
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
+from accelerate import Accelerator
 
 from deep_cross_attention import (
     GPT,
     DCAGPT
 )
-
-# constants
-
-NUM_BATCHES = int(1e5)
-BATCH_SIZE = 4
-GRAD_ACCUM_EVERY = 4
-LEARNING_RATE = 1e-4
-VALIDATE_EVERY = 100
-PRIME_LENGTH = 128
-GENERATE_EVERY = 500
-GENERATE_LENGTH = 512
-SEQ_LEN = 512
-
-USE_DCA = True
 
 # helpers
 
@@ -50,7 +52,7 @@ def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
 
 def gumbel_noise(t):
-    noise = torch.zeros_like(t).uniform_(0, 1)
+    noise = torch.zeros_like(t).uniform_(0, 1).to(t.device)
     return -log(-log(noise))
 
 def gumbel_sample(t, temperature = 1., dim = -1, keepdim = True):
@@ -83,30 +85,7 @@ def base_decoding(
 
     return out[..., prompt_seq_len:]
 
-# model
-
-if USE_DCA:
-    model = DCAGPT(
-        num_tokens = 256,
-        dim = 512,
-        depth = 6,
-        past_layers_k = 2  # the `k` value in their paper, which refers to how many layers in the past it looks, a la Denseformer    
-    )
-else:
-    model = GPT(
-        num_tokens = 256,
-        dim = 512,
-        depth = 6
-    )
-
-model = model.cuda()
-
-# prepare enwik8 data
-
-with gzip.open('./data/enwik8.gz') as file:
-    data = np.frombuffer(file.read(int(95e6)), dtype=np.uint8).copy()
-    np_train, np_valid = np.split(data, [int(90e6)])
-    data_train, data_val = torch.from_numpy(np_train), torch.from_numpy(np_valid)
+# data classes
 
 class TextSamplerDataset(Dataset):
     def __init__(self, data, seq_len):
@@ -120,60 +99,108 @@ class TextSamplerDataset(Dataset):
     def __getitem__(self, index):
         rand_start = torch.randint(0, self.data.size(0) - self.seq_len, (1,))
         full_seq = self.data[rand_start : rand_start + self.seq_len + 1].long()
-        return full_seq.cuda()
+        return full_seq
 
-train_dataset = TextSamplerDataset(data_train, SEQ_LEN)
-val_dataset = TextSamplerDataset(data_val, SEQ_LEN)
-train_loader = DataLoader(train_dataset, batch_size = BATCH_SIZE)
-val_loader = DataLoader(val_dataset, batch_size = BATCH_SIZE)
+# main training loop
 
-# optimizer
+def main(
+    cpu = False,
+    num_batches = int(1e5),
+    batch_size = 4,
+    grad_accum_every = 4,
+    learning_rate = 1e-4,
+    validate_every = 100,
+    prime_length = 128,
+    generate_every = 500,
+    generate_length = 512,
+    seq_len = 512,
+    use_dca = True
+):
+    accelerator = Accelerator(cpu=cpu)
+    device = accelerator.device
 
-optim = Adam(model.parameters(), lr = LEARNING_RATE)
+    # model
 
-train_loader = cycle(train_loader)
-val_loader = cycle(val_loader)
+    if use_dca:
+        model = DCAGPT(
+            num_tokens = 256,
+            dim = 512,
+            depth = 6,
+            past_layers_k = 2  # the `k` value in their paper, which refers to how many layers in the past it looks, a la Denseformer
+        )
+    else:
+        model = GPT(
+            num_tokens = 256,
+            dim = 512,
+            depth = 6
+        )
 
-# training
+    # prepare enwik8 data
 
-for i in tqdm.tqdm(range(NUM_BATCHES), mininterval = 10.0, desc = "training"):
-    model.train()
+    with gzip.open('./data/enwik8.gz') as file:
+        data = np.frombuffer(file.read(int(95e6)), dtype=np.uint8).copy()
+        np_train, np_valid = np.split(data, [int(90e6)])
+        data_train, data_val = torch.from_numpy(np_train), torch.from_numpy(np_valid)
 
-    for _ in range(GRAD_ACCUM_EVERY):
-        data = next(train_loader)
+    train_dataset = TextSamplerDataset(data_train, seq_len)
+    val_dataset = TextSamplerDataset(data_val, seq_len)
+    train_loader = DataLoader(train_dataset, batch_size = batch_size)
+    val_loader = DataLoader(val_dataset, batch_size = batch_size)
 
-        loss = model(data, return_loss = True)
+    # optimizer
 
-        (loss / GRAD_ACCUM_EVERY).backward()
+    optim = Adam(model.parameters(), lr = learning_rate)
 
-    print(f"training loss: {loss.item():.3f}")
+    model, optim, train_loader, val_loader = accelerator.prepare(
+        model, optim, train_loader, val_loader
+    )
 
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+    train_loader_iter = cycle(train_loader)
+    val_loader_iter = cycle(val_loader)
 
-    optim.step()
-    optim.zero_grad()
+    # training
 
-    if i % VALIDATE_EVERY == 0:
-        model.eval()
-        with torch.no_grad():
-            valid_data = next(val_loader)
+    for i in tqdm.tqdm(range(1, num_batches + 1), mininterval = 10.0, desc = "training", disable = not accelerator.is_local_main_process):
+        model.train()
 
-            loss = model(valid_data, return_loss = True)
-            print(f"validation loss: {loss.item():.3f}")
+        for _ in range(grad_accum_every):
+            data = next(train_loader_iter)
 
-    if i % GENERATE_EVERY == 0:
-        model.eval()
+            loss = model(data, return_loss = True)
 
-        inp = random.choice(val_dataset)[:PRIME_LENGTH]
-        inp = inp.cuda()
+            accelerator.backward(loss / grad_accum_every)
 
-        prime = decode_tokens(inp)
-        print(f"\n{prime}\n")
+        accelerator.print(f"training loss: {loss.item():.3f}")
 
-        prompt = inp[None, ...]
+        accelerator.clip_grad_norm_(model.parameters(), 0.5)
 
-        sampled = base_decoding(model, prompt, GENERATE_LENGTH)
+        optim.step()
+        optim.zero_grad()
 
-        base_decode_output = decode_tokens(sampled[0])
+        if i % validate_every == 0:
+            model.eval()
+            with torch.no_grad():
+                valid_data = next(val_loader_iter)
 
-        print(f"\n{base_decode_output}\n")
+                loss = model(valid_data, return_loss = True)
+                accelerator.print(f"validation loss: {loss.item():.3f}")
+
+        if i % generate_every == 0 and accelerator.is_main_process:
+            model.eval()
+
+            inp = random.choice(val_dataset)[:prime_length]
+            inp = inp.to(device)
+
+            prime = decode_tokens(inp)
+            print(f"\n{prime}\n")
+
+            prompt = inp[None, ...]
+
+            sampled = base_decoding(model, prompt, generate_length)
+
+            base_decode_output = decode_tokens(sampled[0])
+
+            print(f"\n{base_decode_output}\n")
+
+if __name__ == '__main__':
+    fire.Fire(main)

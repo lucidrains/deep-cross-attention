@@ -99,7 +99,8 @@ class GRN(Module):
         self,
         dim,
         num_layers,
-        num_outputs = 1
+        num_outputs = 1,
+        activation = nn.ReLU(),
     ):
         super().__init__()
 
@@ -107,12 +108,13 @@ class GRN(Module):
         self.num_layers = num_layers
 
         linear = Linear(dim, num_outputs, bias = False)
-        nn.init.zeros_(linear.weight)
+
+        nn.init.normal_(linear.weight, std = 1e-2)
 
         self.to_aggregate = nn.Sequential(
             RMSNorm(dim),
             linear,
-            nn.ReLU(),
+            activation,
             Rearrange('... outputs -> outputs ...')
         )
 
@@ -145,11 +147,12 @@ class DCABlock(Module):
         grn_num_layers,
         dim_head = 64,
         heads = 8,
-        ff_expansion_factor = 4.
+        ff_expansion_factor = 4.,
+        grn_activation = nn.ReLU()
     ):
         super().__init__()
 
-        self.qkv_grn = GRN(dim, num_layers = grn_num_layers, num_outputs = 3)
+        self.qkv_grn = GRN(dim, num_layers = grn_num_layers, num_outputs = 3, activation = grn_activation)
 
         self.attn = Attention(dim = dim, dim_head = dim_head, heads = heads)
 
@@ -184,7 +187,8 @@ class DCAGPT(Module):
         past_layers_k = 2,
         dim_head = 64,
         heads = 8,
-        ff_expansion_factor = 4.
+        ff_expansion_factor = 4.,
+        grn_activation = nn.ReLU()
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
@@ -204,7 +208,8 @@ class DCAGPT(Module):
                 dim_head = dim_head,
                 heads = heads,
                 ff_expansion_factor = ff_expansion_factor,
-                grn_num_layers = min(past_layers_k * 2, i + 1)
+                grn_num_layers = min(past_layers_k * 2, i + 1),
+                grn_activation = grn_activation
             )
 
             dca_blocks.append(dca)
@@ -217,7 +222,7 @@ class DCAGPT(Module):
 
         self.norm = RMSNorm(dim)
         self.to_logits = Linear(dim, num_tokens, bias = False)
- 
+
     def select_layers(
         self,
         all_tokens_stacked
